@@ -1,6 +1,6 @@
 # FPGA Flight Simulator
 
-**ECE 4305/L — Advanced Digital Design Using SystemVerilog**  
+**ECE 4305/L — Advanced Digital Design Using SystemVerilog (Fall 2026)**  
 **Cal Poly Pomona**  
 **Team:** Christian Ruelas and Jonathan Kwon  
 **Hardware:** Digilent Nexys A7-100T (Artix-7 FPGA)  
