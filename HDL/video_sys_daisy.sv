@@ -31,25 +31,20 @@ logic [CD-1:0] gray_rgb6;
 logic [CD-1:0] user5_rgb5;
 logic [CD-1:0] user4_rgb4;
 logic [CD-1:0] hud_rgb;
-logic [CD-1:0] ghost_rgb3;
 logic [CD-1:0] osd_rgb2;
-logic [CD-1:0] mouse_rgb1;
 
 // HUD attitude signals
 logic signed [15:0] hud_pitch_offset;
 logic signed [15:0] hud_roll_slope;
 
-// Video stream input to VGA synchronization core
+// VGA synchronization input
 logic [CD:0] line_data_in;
 
 // Frame counter
 logic inc, frame_start;
 logic [10:0] x, y;
 
-// Synchronization delay line
-// Previous pipeline: 9 stages
-// Additional HUD:     3 stages
-// Total:             12 stages
+// Video synchronization delay
 logic [12:1] frame_start_d_reg;
 logic [12:1] inc_d_reg;
 
@@ -58,13 +53,15 @@ logic frame_wr, frame_cs;
 logic [19:0] frame_addr;
 logic [31:0] frame_wr_data;
 
-// Video core slot interface
+// Video slot interface
 logic [7:0] slot_cs_array;
 logic [7:0] slot_mem_wr_array;
 logic [13:0] slot_reg_addr_array [7:0];
 logic [31:0] slot_wr_data_array [7:0];
 
-// Delay frame start and valid signals
+// ------------------------------------------------------------
+// Delay frame-start and valid signals
+// ------------------------------------------------------------
 always_ff @(posedge clk_sys, posedge reset_sys)
 begin
     if (reset_sys)
@@ -88,7 +85,9 @@ begin
     end
 end
 
-// Instantiate frame counter
+// ------------------------------------------------------------
+// Frame counter
+// ------------------------------------------------------------
 frame_counter
 #(
     .HMAX(640),
@@ -109,7 +108,9 @@ frame_counter_unit
     .frame_end()
 );
 
-// Instantiate video decoding circuit
+// ------------------------------------------------------------
+// Video address decoder
+// ------------------------------------------------------------
 chu_video_controller ctrl_unit
 (
     .video_cs(video_cs),
@@ -128,7 +129,9 @@ chu_video_controller ctrl_unit
     .slot_wr_data_array(slot_wr_data_array)
 );
 
-// Instantiate frame buffer
+// ------------------------------------------------------------
+// Frame buffer
+// ------------------------------------------------------------
 chu_frame_buffer_core
 #(
     .CD(CD),
@@ -151,7 +154,9 @@ buf_unit
     .so_rgb(frame_rgb8)
 );
 
-// Instantiate bar generator
+// ------------------------------------------------------------
+// VGA bar generator
+// ------------------------------------------------------------
 chu_vga_bar_core v7_bar_unit
 (
     .clk(clk_sys),
@@ -169,7 +174,9 @@ chu_vga_bar_core v7_bar_unit
     .so_rgb(bar_rgb7)
 );
 
-// Instantiate RGB-to-gray generator
+// ------------------------------------------------------------
+// RGB-to-grayscale core
+// ------------------------------------------------------------
 chu_rgb2gray_core v6_gray_unit
 (
     .clk(clk_sys),
@@ -184,7 +191,9 @@ chu_rgb2gray_core v6_gray_unit
     .so_rgb(gray_rgb6)
 );
 
-// Custom artificial horizon in V5_USER5
+// ------------------------------------------------------------
+// Custom artificial horizon - V5_USER5
+// ------------------------------------------------------------
 flight_horizon_core v5_user_unit
 (
     .clk(clk_sys),
@@ -201,12 +210,13 @@ flight_horizon_core v5_user_unit
     .si_rgb(gray_rgb6),
     .so_rgb(user5_rgb5),
 
-    // Export attitude values to HUD
     .hud_pitch_offset(hud_pitch_offset),
     .hud_roll_slope(hud_roll_slope)
 );
 
-// Custom 8-face mountain renderer in V4_USER4
+// ------------------------------------------------------------
+// Custom 8-face mountain renderer - V4_USER4
+// ------------------------------------------------------------
 flight_mountain_core v4_user_unit
 (
     .clk(clk_sys),
@@ -224,7 +234,9 @@ flight_mountain_core v4_user_unit
     .so_rgb(user4_rgb4)
 );
 
-// Custom attitude indicator HUD overlay
+// ------------------------------------------------------------
+// Custom attitude indicator HUD
+// ------------------------------------------------------------
 flight_hud_core hud_unit
 (
     .clk(clk_sys),
@@ -233,41 +245,19 @@ flight_hud_core hud_unit
     .x(x),
     .y(y),
 
-    // Existing attitude control values
     .pitch_offset(hud_pitch_offset),
     .roll_slope(hud_roll_slope),
 
-    // Overlay HUD on top of mountain graphics
     .si_rgb(user4_rgb4),
     .so_rgb(hud_rgb)
 );
 
-// Instantiate ghost sprite
-chu_vga_sprite_ghost_core
-#(
-    .CD(CD),
-    .ADDR_WIDTH(10),
-    .KEY_COLOR(KEY_COLOR)
-)
-v3_ghost_unit
-(
-    .clk(clk_sys),
-    .reset(reset_sys),
-
-    .x(x),
-    .y(y),
-
-    .cs(slot_cs_array[`V3_GHOST]),
-    .write(slot_mem_wr_array[`V3_GHOST]),
-    .addr(slot_reg_addr_array[`V3_GHOST]),
-    .wr_data(slot_wr_data_array[`V3_GHOST]),
-
-    // HUD output feeds downstream video cores
-    .si_rgb(hud_rgb),
-    .so_rgb(ghost_rgb3)
-);
-
-// Instantiate on-screen display
+// ------------------------------------------------------------
+// On-screen display - V2_OSD
+//
+// Retained for future flight instruments:
+// airspeed, altitude, heading, and vertical speed.
+// ------------------------------------------------------------
 chu_vga_osd_core
 #(
     .CD(CD),
@@ -286,39 +276,17 @@ v2_osd_unit
     .addr(slot_reg_addr_array[`V2_OSD]),
     .wr_data(slot_wr_data_array[`V2_OSD]),
 
-    .si_rgb(ghost_rgb3),
+    // HUD now connects directly to OSD
+    .si_rgb(hud_rgb),
     .so_rgb(osd_rgb2)
 );
 
-// Instantiate mouse sprite
-chu_vga_sprite_mouse_core
-#(
-    .CD(CD),
-    .ADDR_WIDTH(10),
-    .KEY_COLOR(KEY_COLOR)
-)
-v1_mouse_unit
-(
-    .clk(clk_sys),
-    .reset(reset_sys),
-
-    .x(x),
-    .y(y),
-
-    .cs(slot_cs_array[`V1_MOUSE]),
-    .write(slot_mem_wr_array[`V1_MOUSE]),
-    .addr(slot_reg_addr_array[`V1_MOUSE]),
-    .wr_data(slot_wr_data_array[`V1_MOUSE]),
-
-    .si_rgb(osd_rgb2),
-    .so_rgb(mouse_rgb1)
-);
-
-// Merge RGB data with delayed frame-start signal
+// ------------------------------------------------------------
+// VGA synchronization
+// ------------------------------------------------------------
 assign line_data_in =
-    {mouse_rgb1, frame_start_d_reg[12]};
+    {osd_rgb2, frame_start_d_reg[12]};
 
-// Instantiate VGA synchronization core
 chu_vga_sync_core
 #(
     .CD(CD)
