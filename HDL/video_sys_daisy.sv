@@ -30,6 +30,7 @@ logic [CD-1:0] bar_rgb7;
 logic [CD-1:0] gray_rgb6;
 logic [CD-1:0] user5_rgb5;
 logic [CD-1:0] user4_rgb4;
+logic [CD-1:0] cloud_rgb3;
 logic [CD-1:0] hud_rgb;
 logic [CD-1:0] osd_rgb2;
 
@@ -45,8 +46,8 @@ logic inc, frame_start;
 logic [10:0] x, y;
 
 // Video synchronization delay
-logic [12:1] frame_start_d_reg;
-logic [12:1] inc_d_reg;
+logic [13:1] frame_start_d_reg;
+logic [13:1] inc_d_reg;
 
 // Frame buffer interface
 logic frame_wr, frame_cs;
@@ -74,7 +75,7 @@ begin
         frame_start_d_reg[1] <= frame_start;
         inc_d_reg[1] <= inc;
 
-        for (integer i = 2; i <= 12; i++)
+        for (integer i = 2; i <= 13; i++)
         begin
             frame_start_d_reg[i] <=
                 frame_start_d_reg[i-1];
@@ -155,9 +156,9 @@ buf_unit
 );
 
 // ------------------------------------------------------------
-// VGA bar generator
+// VGA bar generator - V6_BAR
 // ------------------------------------------------------------
-chu_vga_bar_core v7_bar_unit
+chu_vga_bar_core v6_bar_unit
 (
     .clk(clk_sys),
     .reset(reset_sys),
@@ -165,36 +166,36 @@ chu_vga_bar_core v7_bar_unit
     .x(x),
     .y(y),
 
-    .cs(slot_cs_array[`V7_BAR]),
-    .write(slot_mem_wr_array[`V7_BAR]),
-    .addr(slot_reg_addr_array[`V7_BAR]),
-    .wr_data(slot_wr_data_array[`V7_BAR]),
+    .cs(slot_cs_array[`V6_BAR]),
+    .write(slot_mem_wr_array[`V6_BAR]),
+    .addr(slot_reg_addr_array[`V6_BAR]),
+    .wr_data(slot_wr_data_array[`V6_BAR]),
 
     .si_rgb(frame_rgb8),
     .so_rgb(bar_rgb7)
 );
 
 // ------------------------------------------------------------
-// RGB-to-grayscale core
+// RGB-to-grayscale core - V5_GRAY
 // ------------------------------------------------------------
-chu_rgb2gray_core v6_gray_unit
+chu_rgb2gray_core v5_gray_unit
 (
     .clk(clk_sys),
     .reset(reset_sys),
 
-    .cs(slot_cs_array[`V6_GRAY]),
-    .write(slot_mem_wr_array[`V6_GRAY]),
-    .addr(slot_reg_addr_array[`V6_GRAY]),
-    .wr_data(slot_wr_data_array[`V6_GRAY]),
+    .cs(slot_cs_array[`V5_GRAY]),
+    .write(slot_mem_wr_array[`V5_GRAY]),
+    .addr(slot_reg_addr_array[`V5_GRAY]),
+    .wr_data(slot_wr_data_array[`V5_GRAY]),
 
     .si_rgb(bar_rgb7),
     .so_rgb(gray_rgb6)
 );
 
 // ------------------------------------------------------------
-// Custom artificial horizon - V5_USER5
+// Artificial horizon - V1_HORIZON
 // ------------------------------------------------------------
-flight_horizon_core v5_user_unit
+flight_horizon_core v1_horizon_unit
 (
     .clk(clk_sys),
     .reset(reset_sys),
@@ -202,10 +203,10 @@ flight_horizon_core v5_user_unit
     .x(x),
     .y(y),
 
-    .cs(slot_cs_array[`V5_USER5]),
-    .write(slot_mem_wr_array[`V5_USER5]),
-    .addr(slot_reg_addr_array[`V5_USER5]),
-    .wr_data(slot_wr_data_array[`V5_USER5]),
+    .cs(slot_cs_array[`V1_HORIZON]),
+    .write(slot_mem_wr_array[`V1_HORIZON]),
+    .addr(slot_reg_addr_array[`V1_HORIZON]),
+    .wr_data(slot_wr_data_array[`V1_HORIZON]),
 
     .si_rgb(gray_rgb6),
     .so_rgb(user5_rgb5),
@@ -215,9 +216,9 @@ flight_horizon_core v5_user_unit
 );
 
 // ------------------------------------------------------------
-// Custom 8-face mountain renderer - V4_USER4
+// Three snowcapped mountains - V3_MOUNTAIN
 // ------------------------------------------------------------
-flight_mountain_core v4_user_unit
+flight_mountain_core v3_mountain_unit
 (
     .clk(clk_sys),
     .reset(reset_sys),
@@ -225,17 +226,37 @@ flight_mountain_core v4_user_unit
     .x(x),
     .y(y),
 
-    .cs(slot_cs_array[`V4_USER4]),
-    .write(slot_mem_wr_array[`V4_USER4]),
-    .addr(slot_reg_addr_array[`V4_USER4]),
-    .wr_data(slot_wr_data_array[`V4_USER4]),
+    .cs(slot_cs_array[`V3_MOUNTAIN]),
+    .write(slot_mem_wr_array[`V3_MOUNTAIN]),
+    .addr(slot_reg_addr_array[`V3_MOUNTAIN]),
+    .wr_data(slot_wr_data_array[`V3_MOUNTAIN]),
 
     .si_rgb(user5_rgb5),
     .so_rgb(user4_rgb4)
 );
 
 // ------------------------------------------------------------
-// Custom attitude indicator HUD
+// Three moving clouds - V4_CLOUD
+// ------------------------------------------------------------
+flight_cloud_core v4_cloud_unit
+(
+    .clk(clk_sys),
+    .reset(reset_sys),
+
+    .x(x),
+    .y(y),
+
+    .cs(slot_cs_array[`V4_CLOUD]),
+    .write(slot_mem_wr_array[`V4_CLOUD]),
+    .addr(slot_reg_addr_array[`V4_CLOUD]),
+    .wr_data(slot_wr_data_array[`V4_CLOUD]),
+
+    .si_rgb(user4_rgb4),
+    .so_rgb(cloud_rgb3)
+);
+
+// ------------------------------------------------------------
+// Attitude indicator HUD
 // ------------------------------------------------------------
 flight_hud_core hud_unit
 (
@@ -248,15 +269,12 @@ flight_hud_core hud_unit
     .pitch_offset(hud_pitch_offset),
     .roll_slope(hud_roll_slope),
 
-    .si_rgb(user4_rgb4),
+    .si_rgb(cloud_rgb3),
     .so_rgb(hud_rgb)
 );
 
 // ------------------------------------------------------------
 // On-screen display - V2_OSD
-//
-// Retained for future flight instruments:
-// airspeed, altitude, heading, and vertical speed.
 // ------------------------------------------------------------
 chu_vga_osd_core
 #(
@@ -276,16 +294,15 @@ v2_osd_unit
     .addr(slot_reg_addr_array[`V2_OSD]),
     .wr_data(slot_wr_data_array[`V2_OSD]),
 
-    // HUD now connects directly to OSD
     .si_rgb(hud_rgb),
     .so_rgb(osd_rgb2)
 );
 
 // ------------------------------------------------------------
-// VGA synchronization
+// VGA synchronization - V0_SYNC
 // ------------------------------------------------------------
 assign line_data_in =
-    {osd_rgb2, frame_start_d_reg[12]};
+    {osd_rgb2, frame_start_d_reg[13]};
 
 chu_vga_sync_core
 #(
@@ -303,7 +320,7 @@ v0_vga_sync_unit
     .wr_data(slot_wr_data_array[`V0_SYNC]),
 
     .si_data(line_data_in),
-    .si_valid(inc_d_reg[12]),
+    .si_valid(inc_d_reg[13]),
     .si_ready(inc),
 
     .hsync(hsync),
