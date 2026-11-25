@@ -1,4 +1,3 @@
-
 module flight_mountain_core
 (
     input logic clk, reset,
@@ -18,10 +17,11 @@ module flight_mountain_core
 // Register addresses
 localparam BYPASS_REG = 14'h2000;
 localparam FACE_BASE  = 14'h2001;
-localparam COMMIT_REG = 14'h2059;
+localparam COMMIT_REG = 14'h2109;
 
-// Two mountains, four triangular faces each
-localparam FACE_COUNT = 8;
+// Three mountains:
+// 12 snowcap faces + 12 mountain body faces
+localparam FACE_COUNT = 24;
 localparam FACE_STRIDE = 11;
 
 // VGA coordinate delay
@@ -29,20 +29,20 @@ logic [10:0] x_d1, x_d2, x_d3, x_d4, x_d5;
 logic [10:0] y_d1, y_d2, y_d3, y_d4, y_d5;
 
 // Shadow registers written by MicroBlaze
-logic signed [15:0] shadow_a [0:7][0:2];
-logic signed [15:0] shadow_b [0:7][0:2];
-logic signed [31:0] shadow_c [0:7][0:2];
+logic signed [15:0] shadow_a [0:FACE_COUNT-1][0:2];
+logic signed [15:0] shadow_b [0:FACE_COUNT-1][0:2];
+logic signed [31:0] shadow_c [0:FACE_COUNT-1][0:2];
 
-logic [11:0] shadow_color [0:7];
-logic shadow_enable [0:7];
+logic [11:0] shadow_color [0:FACE_COUNT-1];
+logic shadow_enable [0:FACE_COUNT-1];
 
 // Active geometry used for rendering
-logic signed [15:0] active_a [0:7][0:2];
-logic signed [15:0] active_b [0:7][0:2];
-logic signed [31:0] active_c [0:7][0:2];
+logic signed [15:0] active_a [0:FACE_COUNT-1][0:2];
+logic signed [15:0] active_b [0:FACE_COUNT-1][0:2];
+logic signed [31:0] active_c [0:FACE_COUNT-1][0:2];
 
-logic [11:0] active_color [0:7];
-logic active_enable [0:7];
+logic [11:0] active_color [0:FACE_COUNT-1];
+logic active_enable [0:FACE_COUNT-1];
 
 logic bypass_reg;
 logic commit_pending;
@@ -51,33 +51,35 @@ logic commit_pending;
 logic [10:0] prev_x, prev_y;
 
 // Incremental edge values
-logic signed [31:0] row_base [0:7][0:2];
-logic signed [31:0] edge_state [0:7][0:2];
+logic signed [31:0] row_base [0:FACE_COUNT-1][0:2];
+logic signed [31:0] edge_state [0:FACE_COUNT-1][0:2];
 
 // Stage 1
-logic signed [31:0] s1_edge [0:7][0:2];
-logic [11:0] s1_color [0:7];
-logic s1_enable [0:7];
+logic signed [31:0] s1_edge [0:FACE_COUNT-1][0:2];
+logic [11:0] s1_color [0:FACE_COUNT-1];
+logic s1_enable [0:FACE_COUNT-1];
 logic [11:0] s1_rgb;
 logic s1_bypass;
 
 // Stage 2
-logic signed [31:0] s2_edge [0:7][0:2];
-logic [11:0] s2_color [0:7];
-logic s2_enable [0:7];
+logic signed [31:0] s2_edge [0:FACE_COUNT-1][0:2];
+logic [11:0] s2_color [0:FACE_COUNT-1];
+logic s2_enable [0:FACE_COUNT-1];
 logic [11:0] s2_rgb;
 logic s2_bypass;
 
 // Stage 3
-logic [7:0] s3_inside;
-logic [11:0] s3_color [0:7];
+logic [FACE_COUNT-1:0] s3_inside;
+logic [11:0] s3_color [0:FACE_COUNT-1];
 logic [11:0] s3_rgb;
 logic s3_bypass;
 
 // Final color selection
 logic [11:0] selected_rgb;
 
-// Delay VGA coordinates to align with horizon
+// ------------------------------------------------------------
+// VGA coordinate alignment
+// ------------------------------------------------------------
 always_ff @(posedge clk, posedge reset)
 begin
     if (reset)
@@ -110,7 +112,9 @@ begin
     end
 end
 
+// ------------------------------------------------------------
 // Shadow register interface
+// ------------------------------------------------------------
 always_ff @(posedge clk, posedge reset)
 begin
     if (reset)
@@ -150,7 +154,7 @@ begin
             if (addr == COMMIT_REG)
                 commit_pending <= 1'b1;
 
-            // Write shadow geometry for all 8 faces
+            // Write shadow geometry for all 24 faces
             for (integer f = 0; f < FACE_COUNT; f++)
             begin
                 case (addr)
@@ -204,7 +208,9 @@ begin
     end
 end
 
-// Stage 1: Update incremental edge functions
+// ------------------------------------------------------------
+// Stage 1: Incremental edge-function calculations
+// ------------------------------------------------------------
 always_ff @(posedge clk, posedge reset)
 begin
     if (reset)
@@ -261,8 +267,7 @@ begin
 
             for (integer e = 0; e < 3; e++)
             begin
-
-                // Start of a new VGA frame
+                // Start of new VGA frame
                 if ((x_d5 == 0) && (y_d5 == 0))
                 begin
                     if (commit_pending)
@@ -305,8 +310,6 @@ begin
                     s1_edge[f][e] <=
                         edge_state[f][e] + active_a[f][e];
                 end
-
-                // Same pixel, retain edge value
                 else
                 begin
                     s1_edge[f][e] <= edge_state[f][e];
@@ -316,7 +319,9 @@ begin
     end
 end
 
+// ------------------------------------------------------------
 // Stage 2: Register edge values and RGB
+// ------------------------------------------------------------
 always_ff @(posedge clk, posedge reset)
 begin
     if (reset)
@@ -349,7 +354,9 @@ begin
     end
 end
 
+// ------------------------------------------------------------
 // Stage 3: Classify triangle pixels
+// ------------------------------------------------------------
 always_ff @(posedge clk, posedge reset)
 begin
     if (reset)
@@ -379,7 +386,16 @@ begin
     end
 end
 
-// Face priority: lower face index drawn in front
+// ------------------------------------------------------------
+// Face priority
+//
+// Lower face indices have higher priority.
+//
+// Faces 0-11: Snowcaps
+// Faces 12-23: Mountain bodies
+//
+// Therefore, snowcaps render over the mountain body.
+// ------------------------------------------------------------
 always_comb
 begin
     selected_rgb = s3_rgb;
@@ -391,7 +407,9 @@ begin
     end
 end
 
+// ------------------------------------------------------------
 // Stage 4: Final RGB output
+// ------------------------------------------------------------
 always_ff @(posedge clk, posedge reset)
 begin
     if (reset)
