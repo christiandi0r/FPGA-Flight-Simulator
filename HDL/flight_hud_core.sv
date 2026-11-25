@@ -1,4 +1,3 @@
-
 module flight_hud_core
 (
     input logic clk, reset,
@@ -21,8 +20,9 @@ localparam XC = 320;
 localparam YC = 240;
 
 // VGA coordinate delay
-logic [10:0] x_pipe [0:8];
-logic [10:0] y_pipe [0:8];
+// Extended by one stage for the cloud renderer
+logic [10:0] x_pipe [0:9];
+logic [10:0] y_pipe [0:9];
 
 // Fixed-point rotation coefficients (Q8)
 logic signed [9:0] sin_q8;
@@ -80,7 +80,7 @@ always_ff @(posedge clk, posedge reset)
 begin
     if (reset)
     begin
-        for (integer i = 0; i < 9; i++)
+        for (integer i = 0; i < 10; i++)
         begin
             x_pipe[i] <= 0;
             y_pipe[i] <= 0;
@@ -91,7 +91,7 @@ begin
         x_pipe[0] <= x;
         y_pipe[0] <= y;
 
-        for (integer i = 1; i < 9; i++)
+        for (integer i = 1; i < 10; i++)
         begin
             x_pipe[i] <= x_pipe[i-1];
             y_pipe[i] <= y_pipe[i-1];
@@ -240,10 +240,10 @@ end
 // Coordinates relative to aircraft center
 // ------------------------------------------------------------
 assign dx =
-    $signed({1'b0, x_pipe[8]}) - 16'sd320;
+    $signed({1'b0, x_pipe[9]}) - 16'sd320;
 
 assign dy =
-    $signed({1'b0, y_pipe[8]}) -
+    $signed({1'b0, y_pipe[9]}) -
     16'sd240 -
     pitch_offset;
 
@@ -280,8 +280,8 @@ begin
         s1_cos <= cos_reg;
         s1_abs_roll <= abs_roll;
 
-        s1_x <= x_pipe[8];
-        s1_y <= y_pipe[8];
+        s1_x <= x_pipe[9];
+        s1_y <= y_pipe[9];
 
         s1_rgb <= si_rgb;
     end
@@ -317,7 +317,7 @@ begin
     end
     else
     begin
-        // Convert Q8 rotation products to pixel coordinates
+        // Convert Q8 products to pixel coordinates
         s2_horizontal <=
             (s1_dx_cos + s1_dy_sin) >>> 8;
 
@@ -336,7 +336,7 @@ begin
         end
         else
         begin
-            // Continuous pointer movement
+            // Moving roll pointer
             s2_pointer_x <=
                 13'sd320 -
                 ($signed(s1_sin) -
@@ -374,21 +374,14 @@ begin
     // ========================================================
     // PITCH LADDER
     // ========================================================
-    // Pitch markings:
     // +/-5, +/-10, +/-15, +/-20 degrees
-    //
-    // Each 5 degrees corresponds to 25 pixels.
-    //
-    // Original solid white thickness:
-    // approximately 3 pixels.
-    //
-    // Symmetric drawing region:
-    // y = 100 to 380.
+    // Solid-white lines, original thickness
+    // Symmetric drawing area: y = 100 to 380
 
     if ((s2_x >= 120) && (s2_x <= 520) &&
         (s2_y >= 100) && (s2_y <= 380))
     begin
-        // +/- 5 degrees - short lines
+        // +/- 5 degrees: short lines
         if (((s2_vertical >= 24) &&
              (s2_vertical <= 26)) ||
             ((s2_vertical >= -26) &&
@@ -399,7 +392,7 @@ begin
                 pitch_mark = 1'b1;
         end
 
-        // +/- 10 degrees - long lines
+        // +/- 10 degrees: long lines
         if (((s2_vertical >= 49) &&
              (s2_vertical <= 51)) ||
             ((s2_vertical >= -51) &&
@@ -410,7 +403,7 @@ begin
                 pitch_mark = 1'b1;
         end
 
-        // +/- 15 degrees - short lines
+        // +/- 15 degrees: short lines
         if (((s2_vertical >= 74) &&
              (s2_vertical <= 76)) ||
             ((s2_vertical >= -76) &&
@@ -421,7 +414,7 @@ begin
                 pitch_mark = 1'b1;
         end
 
-        // +/- 20 degrees - long lines
+        // +/- 20 degrees: long lines
         if (((s2_vertical >= 99) &&
              (s2_vertical <= 101)) ||
             ((s2_vertical >= -101) &&
@@ -478,8 +471,6 @@ begin
     // ========================================================
     // FIXED CENTER DOT
     // ========================================================
-    // Uses screen coordinates, not rotated coordinates.
-
     if ((s2_x >= 318) && (s2_x <= 322) &&
         (s2_y >= 238) && (s2_y <= 242))
         center_dot = 1'b1;
