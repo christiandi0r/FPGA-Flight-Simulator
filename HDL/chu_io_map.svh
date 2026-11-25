@@ -24,19 +24,18 @@
 `define S12_DDFS     12
 `define S13_ADSR     13
 
-// video module definition
-`define V0_SYNC      0
-`define V1_MOUSE     1
-`define V2_OSD       2
-`define V3_GHOST     3
-`define V4_USER4     4
-`define V5_USER5     5
-`define V6_GRAY      6
-`define V7_BAR       7
+// Video module definitions
+`define V0_SYNC       0
+`define V1_HORIZON    1
+`define V2_OSD        2
+`define V3_MOUNTAIN   3
+`define V4_CLOUD      4
+`define V5_GRAY       5
+`define V6_BAR        6
+`define V7_UNUSED     7
 
 // video frame buffer
 `define FRAME_OFFSET 0x00c00000
 `define FRAME_BASE   BRIDGE_BASE+FRAME_OFFSET
 
 `endif //_CHU_IO_MAP
-
