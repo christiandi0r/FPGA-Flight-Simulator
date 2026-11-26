@@ -13,9 +13,9 @@ module font_rom
    logic [DATA_WIDTH-1:0] rom [0:2**ADDR_WIDTH-1];
    logic [DATA_WIDTH-1:0] data_reg;
    
-   // font.txt specifies the initial values of ram 
+   // font.mem specifies the initial values of ram 
    initial 
-      $readmemb("font.txt", rom);
+      $readmemb("font.mem", rom);
       
    // body
    always_ff @(posedge clk)
