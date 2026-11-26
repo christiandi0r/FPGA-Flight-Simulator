@@ -185,6 +185,6 @@ Integrate PS/2 controls into the working simulator and verify that keyboard even
 
 | Team member | Primary work area |
 | --- | --- |
-| **Christian Ruelas** | Flight-display HDL, ADXL362 SPI integration, MicroBlaze C++ simulation, and current VGA telemetry / HUD integration |
-| **Jonathan Kwon** | PS/2 keyboard input integration (in progress) |
+| **Christian Ruelas** | Flight-display HDL, ADXL362 SPI integration, MicroBlaze C++ simulation |
+| **Jonathan Kwon** | VGA telemetry / HUD integration, PS/2 keyboard input integration (in progress) |
 | **Both** | System integration, validation, documentation, and final demo |
