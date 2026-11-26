@@ -13,7 +13,7 @@ module flight_hud_core
 );
 
 // HUD color
-localparam WHITE = 12'hFFF;
+localparam [11:0] HUD_GREEN = 12'h0F0;
 
 // VGA screen center
 localparam XC = 320;
@@ -485,7 +485,7 @@ begin
         roll_pointer ||
         center_dot)
     begin
-        hud_rgb = WHITE;
+        hud_rgb = HUD_GREEN;
     end
 end
 
