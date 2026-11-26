@@ -4,6 +4,7 @@
 #include "vga_core.h"
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 
 // Instantiate SPI, switches, and VGA cores
 SpiCore spi(get_slot_addr(BRIDGE_BASE, S9_SPI));
@@ -12,6 +13,9 @@ GpiCore sw(get_slot_addr(BRIDGE_BASE, S3_SW));
 GpvCore horizon(get_sprite_addr(BRIDGE_BASE, V1_HORIZON));
 GpvCore mountain(get_sprite_addr(BRIDGE_BASE, V3_MOUNTAIN));
 GpvCore clouds(get_sprite_addr(BRIDGE_BASE, V4_CLOUD));
+
+// Instantiate on-screen display
+OsdCore osd(get_sprite_addr(BRIDGE_BASE, V2_OSD));
 
 // ADXL362 registers
 const uint8_t RD_CMD = 0x0B;
@@ -174,19 +178,12 @@ Vertex3D mountain_vertices[TOTAL_VERTICES];
 
 // ------------------------------------------------------------
 // Cloud world positions
-//
-// X = horizontal position in meters
-// Y = altitude above ground in meters
-// Z = distance into the world in meters
-//
-// These are fixed world locations.
-// Their SCREEN positions change as the aircraft moves.
 // ------------------------------------------------------------
 const Vertex3D CLOUD_POSITIONS[CLOUD_COUNT] =
 {
-    {-2400.0f, 2600.0f, 3400.0f},   // Left cloud - higher
-    { -300.0f, 2900.0f, 4600.0f},   // Middle cloud - highest
-    { 2200.0f, 2650.0f, 3800.0f}    // Right cloud - higher
+    {-2400.0f, 2600.0f, 3400.0f},
+    { -300.0f, 2900.0f, 4600.0f},
+    { 2200.0f, 2650.0f, 3800.0f}
 };
 
 // ------------------------------------------------------------
@@ -536,7 +533,7 @@ void update_flight_dynamics(AircraftState *aircraft)
     }
 
     // Vertical movement
-    float climb_rate = velocity * sin(pitch_rad);
+    float climb_rate = -velocity * sin(pitch_rad);
 
     aircraft->altitude +=
         climb_rate * DT * METER_TO_FEET;
@@ -584,9 +581,6 @@ void update_horizon(float pitch, float roll)
 
 // ------------------------------------------------------------
 // Calculate camera transform
-//
-// Called once per scenery update.
-// Shared between mountains and clouds.
 // ------------------------------------------------------------
 void calculate_camera_transform(
     AircraftState *aircraft,
@@ -613,8 +607,6 @@ void calculate_camera_transform(
 
 // ------------------------------------------------------------
 // Project 3D world vertex onto VGA
-//
-// Used by both mountains and clouds.
 // ------------------------------------------------------------
 bool project_vertex(
     Vertex3D vertex,
@@ -825,13 +817,6 @@ void write_cloud_position(
 
 // ------------------------------------------------------------
 // Update cloud screen positions
-//
-// Each cloud has a fixed world position.
-//
-// When aircraft heading/pitch/roll changes, the
-// perspective projection moves its screen position.
-//
-// Clouds behind the camera are moved off-screen.
 // ------------------------------------------------------------
 void update_clouds(
     AircraftState *aircraft,
@@ -891,6 +876,92 @@ void update_scenery(AircraftState *aircraft)
 }
 
 // ------------------------------------------------------------
+// OSD text helper
+// ------------------------------------------------------------
+void osd_print(int x, int y, const char *text)
+{
+    int i = 0;
+
+    while (text[i] != '\0' &&
+           (x + i) < OsdCore::CHAR_X_MAX)
+    {
+        osd.wr_char(x + i, y, text[i]);
+        i++;
+    }
+}
+
+// ------------------------------------------------------------
+// Initialize transparent OSD telemetry
+// 80 columns x 30 rows, 8x16 pixels per character
+// ------------------------------------------------------------
+void initialize_osd()
+{
+    osd.bypass(1);
+    osd.clr_screen();
+
+    // White glyphs; color 0 is transparent (chroma key)
+    osd.set_color(0xFFF, 0x000);
+    osd.bypass(0);
+}
+
+// ------------------------------------------------------------
+// Update live VGA telemetry (fixed-width text prevents ghosts)
+// ------------------------------------------------------------
+void update_osd(const AircraftState *aircraft)
+{
+    char line[24];
+    int value;
+    int whole;
+    int tenths;
+    char sign;
+
+    // Pitch: nearest tenth of a degree, including sign
+    sign = (aircraft->pitch > 0.0f) ? '-' : '+';
+    value = (int)(fabs(aircraft->pitch) * 10.0f + 0.5f);
+    if (value > 999) value = 999;
+    whole = value / 10;
+    tenths = value % 10;
+    snprintf(line, sizeof(line), "PITCH %c%02d.%1d", sign, whole, tenths);
+    osd_print(1, 0, line);
+
+    // Roll
+    sign = (aircraft->roll < 0.0f) ? '-' : '+';
+    value = (int)(fabs(aircraft->roll) * 10.0f + 0.5f);
+    if (value > 999) value = 999;
+    whole = value / 10;
+    tenths = value % 10;
+    snprintf(line, sizeof(line), "ROLL %c%02d.%1d", sign, whole, tenths);
+    osd_print(68, 0, line);
+
+    // Heading in degrees (000-359)
+    value = (int)(aircraft->heading + 0.5f) % 360;
+    if (value < 0) value += 360;
+    snprintf(line, sizeof(line), "HDG %03d", value);
+    osd_print(1, 28, line);
+
+    // Altitude in feet
+    value = (int)(aircraft->altitude + 0.5f);
+    if (value < 0) value = 0;
+    if (value > 99999) value = 99999;
+    snprintf(line, sizeof(line), "ALT %5d FT", value);
+    osd_print(1, 29, line);
+
+    // Airspeed in knots
+    value = (int)(aircraft->airspeed + 0.5f);
+    if (value < 0) value = 0;
+    if (value > 999) value = 999;
+    snprintf(line, sizeof(line), "SPD %03d KT", value);
+    osd_print(67, 28, line);
+
+    // Vertical speed in feet per minute
+    sign = (aircraft->vertical_speed < 0.0f) ? '-' : '+';
+    value = (int)(fabs(aircraft->vertical_speed) + 0.5f);
+    if (value > 9999) value = 9999;
+    snprintf(line, sizeof(line), "VS %c%04d FPM", sign, value);
+    osd_print(67, 29, line);
+}
+
+// ------------------------------------------------------------
 // Reset aircraft
 // ------------------------------------------------------------
 void reset_flight(AircraftState *aircraft)
@@ -909,6 +980,7 @@ void reset_flight(AircraftState *aircraft)
     // Restore horizon, mountains, and clouds
     update_horizon(0.0f, 0.0f);
     update_scenery(aircraft);
+    update_osd(aircraft);
 
     uart.disp("\n\rFlight simulation reset!\n\r");
 }
@@ -961,10 +1033,15 @@ void flight_simulator(
     // Initialize mountains, snowcaps, and clouds
     update_scenery(&aircraft);
 
+    // Initialize transparent VGA telemetry
+    initialize_osd();
+    update_osd(&aircraft);
+
     uart.disp("Flight simulator active!\n\r");
     uart.disp("Three snowcapped mountains enabled!\n\r");
     uart.disp("Moving clouds enabled!\n\r");
     uart.disp("Attitude HUD enabled!\n\r");
+    uart.disp("Transparent OSD enabled!\n\r");
 
     uart.disp("SW0-SW3 = Airspeed (60-180 knots)\n\r");
     uart.disp("SW15 ON = Reset and Hold\n\r");
@@ -1052,9 +1129,10 @@ void flight_simulator(
         // Update mountains, snowcaps, and clouds
         update_scenery(&aircraft);
 
-        // Print UART telemetry
+        // Update VGA OSD and print UART telemetry
         if (print_counter >= 5)
         {
+            update_osd(&aircraft);
             uart.disp("Pitch: ");
             uart.disp((double)aircraft.pitch, 2);
 
