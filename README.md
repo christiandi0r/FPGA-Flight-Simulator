@@ -24,11 +24,11 @@
 
 ## Overview
 
-This project is an interactive FPGA-based flight display and simulator built around the course **FPro** system. Tilting the Nexys A7 board changes the attitude shown on an external VGA monitor. The display includes an artificial horizon, pitch ladder, roll reference, three snowcapped mountains, and moving clouds. A MicroBlaze soft processor reads the onboard ADXL362 accelerometer over SPI, estimates pitch and roll, maintains additional simulated flight variables, and writes display parameters to memory-mapped FPGA registers.
+This project is an interactive FPGA-based flight display and simulator built around the course **FPro** system. Tilting the Nexys A7 board changes the attitude shown on an external VGA monitor. The display includes an artificial horizon, a bright-green pitch ladder and roll indicator, three snowcapped mountains, moving clouds, and live on-screen flight telemetry. A MicroBlaze soft processor reads the onboard ADXL362 accelerometer over SPI, estimates pitch and roll, maintains additional simulated flight variables, and writes display parameters to memory-mapped FPGA registers.
 
 Custom SystemVerilog video cores generate the flight scene directly from pixel coordinates and registered control values. The C++ application also projects mountain vertices and cloud positions from simulated 3D world coordinates into VGA screen coordinates. This separates software-based sensor processing, flight-state updates, and scene geometry from continuous hardware-based video rendering.
 
-> **Project status:** The accelerometer-driven VGA flight display, three snowcapped mountains, and moving clouds have been demonstrated on the Nexys A7. PS/2 input and readable on-screen flight telemetry are planned/in progress and are **not yet claimed as complete** here. See [Requirements and status](#requirements-and-status).
+> **Project status:** The accelerometer-driven VGA flight display, snowcapped mountains, moving clouds, green attitude HUD, and live VGA telemetry have been demonstrated on the Nexys A7. PS/2 keyboard input remains **planned / in progress**. See [Requirements and status](#requirements-and-status).
 
 ## System architecture
 
@@ -42,8 +42,9 @@ Custom SystemVerilog video cores generate the flight scene directly from pixel c
 2. **C++ reads sensor data using SPI.** MicroBlaze receives X, Y, and Z acceleration values through the FPro SPI core.
 3. **C++ calculates pitch and roll.** The firmware applies calibration, converts measurements into attitude angles, and updates simulated flight variables.
 4. **C++ writes display parameters to FPro registers.** The hardware stores values such as pitch offset, roll slope, mountain triangle edges/colors, and cloud screen positions.
-5. **SystemVerilog evaluates each pixel using those values.** The rendering pipeline checks whether the current pixel belongs to the sky, ground, mountain faces and snowcaps, clouds, pitch ladder, roll scale, or aircraft marker.
-6. **The VGA pipeline outputs the selected RGB color.** The monitor receives the completed pixel stream and displays the updated flight scene.
+5. **C++ updates the on-screen telemetry.** MicroBlaze formats the simulated flight values and writes characters to the memory-mapped OSD core.
+6. **SystemVerilog evaluates each pixel using those values.** The rendering pipeline checks whether the current pixel belongs to the sky, ground, mountain faces and snowcaps, clouds, pitch ladder, roll scale, aircraft marker, or telemetry overlay.
+7. **The VGA pipeline outputs the selected RGB color.** The monitor receives the completed pixel stream and displays the updated flight scene.
 
 ### What runs in C++?
 
@@ -56,7 +57,8 @@ MicroBlaze executes the C++ application to:
 5. Calculate the aircraft's movement through a simple 3D world and project mountain vertices and cloud positions onto the VGA display.
 6. Convert attitude estimates and projected scenery into integer/fixed-point display parameters and write them to video cores through FPro memory-mapped I/O.
 7. Read onboard switches to adjust simulated airspeed (SW0–SW3) and reset/hold the simulation (SW15).
-8. Print flight-state information to the UART terminal for debugging.
+8. Format and write live `PITCH`, `ROLL`, `HDG`, `ALT`, `SPD`, and `VS` values to the VGA character-based OSD.
+9. Print flight-state information to the UART terminal for debugging.
 
 The accelerometer supports tilt estimation under steady or slow movement. It is **not** a complete inertial-navigation system or an absolute heading sensor.
 
@@ -68,7 +70,7 @@ The FPGA video logic processes the current pixel coordinate `(x, y)` and determi
 horizon_y(x) = 240 + pitch_offset + (((x - 320) * roll_slope) >>> 8)
 ```
 
-The arithmetic uses signed, fixed-point values: the right shift rescales the roll-related product. The mountain core rasterizes triangular faces using edge equations, including snowcap faces with separate colors. The cloud core draws three cloud shapes at screen positions provided by MicroBlaze, preserving the existing mountain graphics by drawing clouds only over sky-colored pixels. The HUD overlays the pitch ladder, roll scale, downward-pointing roll marker, and fixed aircraft reference.
+The arithmetic uses signed, fixed-point values: the right shift rescales the roll-related product. The mountain core rasterizes triangular faces using edge equations, including snowcap faces with separate colors. The cloud core draws three cloud shapes at screen positions provided by MicroBlaze, preserving the existing mountain graphics by drawing clouds only over sky-colored pixels. The HUD overlays the bright-green (`12'h0F0`) pitch ladder, roll scale, downward-pointing roll marker, and fixed aircraft reference. The OSD uses character RAM and a font ROM initialized from `font.mem` to render live white text. Additional pixel-based logic draws four black telemetry panels with cyan borders, divider lines, and degree symbols.
 
 Unlike C++, which executes instructions on MicroBlaze, these video circuits exist independently in FPGA fabric. The pixel stream continues while the processor reads the accelerometer and updates registers.
 
@@ -78,14 +80,14 @@ The design integrates several custom SystemVerilog video cores into the course F
 
 | Video slot | Core | Purpose |
 | --- | --- | --- |
-| `V0_SYNC` | VGA synchronization | Outputs the completed video stream |
-| `V1_HORIZON` | `flight_horizon_core` | Draws sky/ground and supplies HUD attitude parameters |
-| `V2_OSD` | On-screen display | Reserved for readable flight telemetry |
-| `V3_MOUNTAIN` | `flight_mountain_core` | Renders three snowcapped mountains using triangle faces |
-| `V4_CLOUD` | `flight_cloud_core` | Draws three clouds at memory-mapped screen positions |
-| `V5_GRAY` | Grayscale core | Existing FPro video stage |
-| `V6_BAR` | Color bar core | Existing FPro video stage |
-| `V7_UNUSED` | Unused | Available for future expansion |
+| `V0_SYNC` | VGA synchronization | Sends pixels to the VGA monitor |
+| `V1_HORIZON` | Artificial horizon | Renders sky and ground; provides attitude data |
+| `V2_OSD` | On-screen display | Renders live telemetry text |
+| `V3_MOUNTAIN` | Mountain renderer | Renders three snowcapped mountains |
+| `V4_CLOUD` | Cloud renderer | Renders three moving clouds |
+| `V5_GRAY` | Grayscale filter | Provides grayscale video processing |
+| `V6_BAR` | Color bar generator | Provides test-color patterns |
+| `V7_UNUSED` | Unused slot | Reserved for future expansion |
 
 Each custom renderer receives:
 
@@ -96,7 +98,7 @@ Each custom renderer receives:
 The slot numbers select **memory-mapped control addresses**, not the order in which pixels are rendered. The actual RGB pipeline is:
 
 ```text
-Frame Buffer → Color Bar → Grayscale → Horizon → Mountains → Clouds → HUD → OSD → VGA
+Frame Buffer → Color Bar → Grayscale → Horizon → Mountains → Clouds → HUD → Telemetry Background → OSD → Cyan Borders / Degree Symbols → VGA
 ```
 
 ## Implemented features
@@ -105,8 +107,8 @@ Frame Buffer → Color Bar → Grayscale → Horizon → Mountains → Clouds �
 - ADXL362 communication over the FPro SPI core
 - Startup level calibration and smoothed attitude response
 - Artificial horizon with sky and ground
-- Moving/rotating pitch ladder and roll reference
-- Downward-pointing triangle roll marker and fixed aircraft reference
+- Moving/rotating bright-green (`12'h0F0`) pitch ladder and roll reference
+- Bright-green downward-pointing triangle roll marker and fixed aircraft reference
 - Three snowcapped mountains with multiple colored triangular faces
 - Perspective-projected mountain scenery that moves with simulated flight and aircraft orientation
 - Three moving clouds with world positions projected into VGA screen coordinates
@@ -114,11 +116,15 @@ Frame Buffer → Color Bar → Grayscale → Horizon → Mountains → Clouds �
 - Simulated heading, altitude, airspeed, and vertical speed
 - Switch-controlled airspeed (SW0–SW3) and simulation reset/hold (SW15)
 - UART flight telemetry for debugging
+- Live VGA telemetry for pitch, roll, heading, altitude, airspeed, and vertical speed
+- Four screen-edge black telemetry panels with cyan borders and white text
+- Degree symbols for pitch, roll, and heading, plus dividers in the bottom panels
+- Character-based VGA text rendering using `V2_OSD`, `font.mem`, and an aligned OSD pixel pipeline
 - Custom SystemVerilog rendering integrated with the FPro video pipeline
 
 ### Selected design refinements
 
-The team has corrected pitch direction to match the desired board movement, resolved a right-edge video artifact, adjusted the pitch-ladder range to reduce clutter, and refined line thickness and roll-marker placement for readability on the VGA monitor. The scenery has expanded from a basic horizon and animated mountains to three snowcapped mountains and clouds whose displayed positions change with the simulated aircraft. Video slot names have also been reorganized to reflect their actual functions.
+The team has corrected pitch direction to match the desired board movement, resolved a right-edge video artifact, adjusted the pitch-ladder range to reduce clutter, and refined line thickness and roll-marker placement for readability on the VGA monitor. The scenery has expanded from a basic horizon and animated mountains to three snowcapped mountains and clouds whose displayed positions change with the simulated aircraft. Video slot names have also been reorganized to reflect their actual functions. The OSD was aligned with the video pipeline to eliminate fragmented glyphs; the final display uses a black-and-cyan instrument-panel layout and bright-green HUD symbology. The pitch display convention and simulated altitude/vertical-speed direction were adjusted for intuitive nose-up and nose-down behavior without changing the existing horizon and terrain rendering.
 
 ## Requirements and status
 
@@ -126,10 +132,10 @@ The team has corrected pitch direction to match the desired board movement, reso
 | --- | --- | --- |
 | Meaningful FPro-based task | **Implemented** | Sensor-to-display flight simulator using FPro cores and custom logic |
 | At least one SPI, I2C, XADC, or audio I/O core | **Implemented** | SPI communication with ADXL362 |
-| PS/2 keyboard or PS/2 mouse | **Planned / in progress** | Keyboard controls for simulator interaction |
 | VGA moving sprite **or object** | **Implemented** | Moving artificial horizon, pitch ladder, snowcapped mountains, and clouds |
-| VGA on-screen text | **Planned / in progress** | Flight telemetry / instrument labels rendered on VGA |
+| VGA on-screen text | **Implemented** | Live `PITCH`, `ROLL`, `HDG`, `ALT`, `SPD`, and `VS` readouts in four VGA instrument panels |
 | New video-core functionality (extra credit) | **Implemented** | Custom `flight_horizon_core`, `flight_mountain_core`, and `flight_cloud_core` |
+| PS/2 keyboard or PS/2 mouse | **Planned / in progress** | Keyboard controls for simulator interaction |
 
 ## Planned integration
 
@@ -137,13 +143,13 @@ The team has corrected pitch direction to match the desired board movement, reso
 
 Add a PS/2 keyboard interface through the FPro system. Proposed controls include resetting the simulation, pausing/resuming, adjusting simulated speed, and showing/hiding display elements. Final key bindings will be documented after implementation.
 
-### VGA on-screen text
+### VGA on-screen text (completed)
 
-Use an on-screen-display or custom text renderer to show live values such as `PITCH`, `ROLL`, `HDG`, `ALT`, `SPD`, and `VS` on the VGA monitor. These readouts should remain screen-aligned while the artificial horizon moves and rotates.
+The existing `V2_OSD` core displays live `PITCH`, `ROLL`, `HDG`, `ALT`, `SPD`, and `VS` values in four black instrument panels. White text is generated from character RAM and the `font.mem` font ROM; SystemVerilog overlays cyan borders, divider lines, and degree symbols. PITCH and ROLL appear at the top corners, and HDG/ALT and SPD/VS at the bottom corners.
 
 ### Integration and testing
 
-Verify keyboard input and on-screen text independently, then merge both into the working video pipeline. Confirm they do not interfere with accelerometer reading, FPro register writes, frame timing, mountain/cloud movement, or existing HUD graphics.
+Integrate PS/2 controls into the working simulator and verify that keyboard events do not interfere with accelerometer readings, FPro register writes, VGA text updates, frame timing, mountain/cloud motion, or the existing HUD.
 
 ## Development workflow
 
@@ -153,7 +159,7 @@ Verify keyboard input and on-screen text independently, then merge both into the
 4. Export the hardware platform to **Vitis** and build the MicroBlaze C++ application against the matching hardware design.
 5. Program the Nexys A7 and run the application.
 6. Connect a VGA monitor and a UART terminal. Follow the level-calibration prompt before tilting the board.
-7. Verify pitch/roll response, snowcapped mountains, moving clouds, numeric UART telemetry, and—once merged—PS/2 controls and VGA text.
+7. Verify pitch/roll response, green HUD symbology, snowcapped mountains, moving clouds, VGA instrument panels, and UART telemetry. Test PS/2 controls once integrated.
 
 **Version note:** Exact Vivado/Vitis project paths, file layout, clock configuration, and programming steps depend on the committed project. Consult the actual Vivado/Vitis sources and constraints; do not assume that generated build files or exported hardware files are included in this repository.
 
@@ -168,8 +174,10 @@ Verify keyboard input and on-screen text independently, then merge both into the
 - [x] Display three moving clouds
 - [x] Verify updated FPro video slot assignments
 - [x] Show simulated flight-state values in the UART terminal
+- [x] Display live flight telemetry on VGA
+- [x] Show black telemetry boxes with cyan borders, divider lines, and degree symbols
+- [x] Show bright-green pitch ladder, roll scale, triangle marker, and center dot
 - [ ] Demonstrate PS/2 keyboard or mouse input
-- [ ] Display readable on-screen text on VGA
 - [ ] Record the final video demonstration
 - [ ] Verify and submit all created/modified HDL, C/C++ drivers, and C/C++ application files
 
@@ -177,6 +185,6 @@ Verify keyboard input and on-screen text independently, then merge both into the
 
 | Team member | Primary work area |
 | --- | --- |
-| **Christian Ruelas** | Current flight-display HDL, ADXL362 SPI integration, MicroBlaze C++ attitude / flight-state simulation |
-| **Jonathan Kwon** | PS/2 input and VGA on-screen text integration |
+| **Christian Ruelas** | Flight-display HDL, ADXL362 SPI integration, MicroBlaze C++ simulation, and current VGA telemetry / HUD integration |
+| **Jonathan Kwon** | PS/2 keyboard input integration (in progress) |
 | **Both** | System integration, validation, documentation, and final demo |
