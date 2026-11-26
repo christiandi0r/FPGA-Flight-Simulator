@@ -21,10 +21,38 @@ module video_sys_daisy
     output logic [11:0] rgb
 );
 
-// Constant declaration
-localparam KEY_COLOR = 0;
+// ------------------------------------------------------------
+// Constants
+// ------------------------------------------------------------
+localparam [CD-1:0] KEY_COLOR = 12'hF0F;
+localparam [CD-1:0] BORDER_COLOR = 12'h0FF;
+localparam [CD-1:0] BLACK = 12'h000;
+localparam [CD-1:0] WHITE = 12'hFFF;
 
-// Video data stream
+
+ // ------------------------------------------------------------
+ // Telemetry panel dimensions
+ // ------------------------------------------------------------
+
+ // Top telemetry text adjustment
+localparam [10:0] TOP_TEXT_OFFSET = 11'd5;
+
+// Top panels - both 112 x 24 pixels
+localparam [10:0] PITCH_RIGHT = 11'd111;
+localparam [10:0] ROLL_LEFT = 11'd528;
+localparam [10:0] TOP_BOTTOM = 11'd23;
+
+// Bottom panels - both 120 x 36 pixels
+localparam [10:0] BOTTOM_LEFT_RIGHT = 11'd119;
+localparam [10:0] BOTTOM_RIGHT_LEFT = 11'd520;
+
+localparam [10:0] BOTTOM_TOP = 11'd444;
+localparam [10:0] BOTTOM_DIVIDER = 11'd463;
+localparam [10:0] BOTTOM_BOTTOM = 11'd479;
+
+// ------------------------------------------------------------
+// Video signals
+// ------------------------------------------------------------
 logic [CD-1:0] frame_rgb8;
 logic [CD-1:0] bar_rgb7;
 logic [CD-1:0] gray_rgb6;
@@ -33,21 +61,45 @@ logic [CD-1:0] user4_rgb4;
 logic [CD-1:0] cloud_rgb3;
 logic [CD-1:0] hud_rgb;
 logic [CD-1:0] osd_rgb2;
+logic [CD-1:0] panel_rgb;
+logic [CD-1:0] osd_background_rgb;
 
 // HUD attitude signals
 logic signed [15:0] hud_pitch_offset;
 logic signed [15:0] hud_roll_slope;
 
-// VGA synchronization input
+// VGA synchronization
 logic [CD:0] line_data_in;
-
-// Frame counter
 logic inc, frame_start;
 logic [10:0] x, y;
 
-// Video synchronization delay
 logic [13:1] frame_start_d_reg;
 logic [13:1] inc_d_reg;
+
+// ------------------------------------------------------------
+// OSD coordinate alignment
+// ------------------------------------------------------------
+logic [10:0] osd_x_pipe [0:12];
+logic [10:0] osd_y_pipe [0:12];
+
+// Adjusted OSD coordinates
+logic [10:0] osd_y_adjusted;
+logic top_text_region;
+logic top_text_clip;
+
+// Panel coordinates
+logic [10:0] panel_x;
+logic [10:0] panel_y;
+
+// Panel signals
+logic panel_region;
+logic panel_border;
+logic degree_pixel;
+
+logic top_left_border;
+logic top_right_border;
+logic bottom_left_border;
+logic bottom_right_border;
 
 // Frame buffer interface
 logic frame_wr, frame_cs;
@@ -61,7 +113,7 @@ logic [13:0] slot_reg_addr_array [7:0];
 logic [31:0] slot_wr_data_array [7:0];
 
 // ------------------------------------------------------------
-// Delay frame-start and valid signals
+// VGA synchronization delay
 // ------------------------------------------------------------
 always_ff @(posedge clk_sys, posedge reset_sys)
 begin
@@ -82,6 +134,32 @@ begin
 
             inc_d_reg[i] <=
                 inc_d_reg[i-1];
+        end
+    end
+end
+
+// ------------------------------------------------------------
+// OSD coordinate delay
+// ------------------------------------------------------------
+always_ff @(posedge clk_sys, posedge reset_sys)
+begin
+    if (reset_sys)
+    begin
+        for (integer i = 0; i < 13; i++)
+        begin
+            osd_x_pipe[i] <= 0;
+            osd_y_pipe[i] <= 0;
+        end
+    end
+    else
+    begin
+        osd_x_pipe[0] <= x;
+        osd_y_pipe[0] <= y;
+
+        for (integer i = 1; i < 13; i++)
+        begin
+            osd_x_pipe[i] <= osd_x_pipe[i-1];
+            osd_y_pipe[i] <= osd_y_pipe[i-1];
         end
     end
 end
@@ -176,7 +254,7 @@ chu_vga_bar_core v6_bar_unit
 );
 
 // ------------------------------------------------------------
-// RGB-to-grayscale core - V5_GRAY
+// Grayscale core - V5_GRAY
 // ------------------------------------------------------------
 chu_rgb2gray_core v5_gray_unit
 (
@@ -216,7 +294,7 @@ flight_horizon_core v1_horizon_unit
 );
 
 // ------------------------------------------------------------
-// Three snowcapped mountains - V3_MOUNTAIN
+// Snowcapped mountains - V3_MOUNTAIN
 // ------------------------------------------------------------
 flight_mountain_core v3_mountain_unit
 (
@@ -236,7 +314,7 @@ flight_mountain_core v3_mountain_unit
 );
 
 // ------------------------------------------------------------
-// Three moving clouds - V4_CLOUD
+// Moving clouds - V4_CLOUD
 // ------------------------------------------------------------
 flight_cloud_core v4_cloud_unit
 (
@@ -273,6 +351,86 @@ flight_hud_core hud_unit
     .so_rgb(hud_rgb)
 );
 
+// ============================================================
+// TELEMETRY PANELS
+//
+// Black backgrounds, cyan borders, white text
+//
+// Top-left:       112 x 24
+// Top-right:      114 x 24
+// Bottom-left:    124 x 40
+// Bottom-right:   120 x 40
+// ============================================================
+
+// Coordinates aligned with OSD rendering
+assign panel_x = osd_x_pipe[12];
+assign panel_y = osd_y_pipe[12];
+
+// ------------------------------------------------------------
+// Panel background regions
+// ------------------------------------------------------------
+assign panel_region =
+
+    // Top-left PITCH
+    ((panel_x <= PITCH_RIGHT) &&
+     (panel_y <= TOP_BOTTOM)) ||
+
+    // Top-right ROLL
+    ((panel_x >= ROLL_LEFT) &&
+     (panel_x <= 639) &&
+     (panel_y <= TOP_BOTTOM)) ||
+
+    // Bottom-left HDG / ALT
+    ((panel_x <= BOTTOM_LEFT_RIGHT) &&
+     (panel_y >= BOTTOM_TOP) &&
+     (panel_y <= BOTTOM_BOTTOM)) ||
+
+    // Bottom-right SPD / VS
+    ((panel_x >= BOTTOM_RIGHT_LEFT) &&
+     (panel_x <= 639) &&
+     (panel_y >= BOTTOM_TOP) &&
+     (panel_y <= BOTTOM_BOTTOM));
+
+// ------------------------------------------------------------
+// Draw black background BEFORE the OSD
+// ------------------------------------------------------------
+assign osd_background_rgb =
+    panel_region ? BLACK : hud_rgb;
+
+// ============================================================
+// TOP TELEMETRY TEXT ALIGNMENT
+//
+// PITCH and ROLL are shifted down by 3 pixels.
+// Bottom telemetry remains unchanged.
+// ============================================================
+
+assign top_text_region =
+    (osd_y_pipe[10] <= TOP_BOTTOM) &&
+    (
+        (osd_x_pipe[10] <= PITCH_RIGHT) ||
+        ((osd_x_pipe[10] >= ROLL_LEFT) &&
+         (osd_x_pipe[10] <= 11'd639))
+    );
+
+// Shift OSD character lookup down 3 pixels
+assign osd_y_adjusted =
+    top_text_region
+        ? (
+            (osd_y_pipe[10] >= TOP_TEXT_OFFSET)
+                ? osd_y_pipe[10] - TOP_TEXT_OFFSET
+                : 11'd480
+          )
+        : osd_y_pipe[10];
+
+// Clip the first three rows to prevent wrapping
+assign top_text_clip =
+    (panel_y < TOP_TEXT_OFFSET) &&
+    (
+        (panel_x <= PITCH_RIGHT) ||
+        ((panel_x >= ROLL_LEFT) &&
+         (panel_x <= 11'd639))
+    );
+
 // ------------------------------------------------------------
 // On-screen display - V2_OSD
 // ------------------------------------------------------------
@@ -286,23 +444,164 @@ v2_osd_unit
     .clk(clk_sys),
     .reset(reset_sys),
 
-    .x(x),
-    .y(y),
+    .x(osd_x_pipe[10]),
+    .y(osd_y_adjusted),
 
     .cs(slot_cs_array[`V2_OSD]),
     .write(slot_mem_wr_array[`V2_OSD]),
     .addr(slot_reg_addr_array[`V2_OSD]),
     .wr_data(slot_wr_data_array[`V2_OSD]),
 
-    .si_rgb(hud_rgb),
+    .si_rgb(osd_background_rgb),
     .so_rgb(osd_rgb2)
 );
+
+// ============================================================
+// CYAN PANEL BORDERS
+//
+// Border thickness: 2 pixels
+// Bottom panel divider: 1 pixel
+// ============================================================
+
+// ------------------------------------------------------------
+// Top-left PITCH border
+// ------------------------------------------------------------
+assign top_left_border =
+    (panel_x <= PITCH_RIGHT) &&
+    (panel_y <= TOP_BOTTOM) &&
+    (
+        (panel_x <= 1) ||
+        (panel_x >= PITCH_RIGHT - 1) ||
+        (panel_y <= 1) ||
+        (panel_y >= TOP_BOTTOM - 1)
+    );
+
+// ------------------------------------------------------------
+// Top-right ROLL border
+// ------------------------------------------------------------
+assign top_right_border =
+    (panel_x >= ROLL_LEFT) &&
+    (panel_x <= 639) &&
+    (panel_y <= TOP_BOTTOM) &&
+    (
+        (panel_x <= ROLL_LEFT + 1) ||
+        (panel_x >= 638) ||
+        (panel_y <= 1) ||
+        (panel_y >= TOP_BOTTOM - 1)
+    );
+
+// ------------------------------------------------------------
+// Bottom-left HDG / ALT border - narrower
+// ------------------------------------------------------------
+assign bottom_left_border =
+    (panel_x <= BOTTOM_LEFT_RIGHT) &&
+    (panel_y >= BOTTOM_TOP) &&
+    (panel_y <= BOTTOM_BOTTOM) &&
+    (
+        (panel_x <= 1) ||
+        (panel_x >= BOTTOM_LEFT_RIGHT - 1) ||
+        (panel_y <= BOTTOM_TOP + 1) ||
+        (panel_y >= BOTTOM_BOTTOM - 1) ||
+        (panel_y == BOTTOM_DIVIDER)
+    );
+
+// ------------------------------------------------------------
+// Bottom-right SPD / VS border - narrower
+// ------------------------------------------------------------
+assign bottom_right_border =
+    (panel_x >= BOTTOM_RIGHT_LEFT) &&
+    (panel_x <= 639) &&
+    (panel_y >= BOTTOM_TOP) &&
+    (panel_y <= BOTTOM_BOTTOM) &&
+    (
+        (panel_x <= BOTTOM_RIGHT_LEFT + 1) ||
+        (panel_x >= 638) ||
+        (panel_y <= BOTTOM_TOP + 1) ||
+        (panel_y >= BOTTOM_BOTTOM - 1) ||
+        (panel_y == BOTTOM_DIVIDER)
+    );
+
+// ------------------------------------------------------------
+// Combine cyan borders
+// ------------------------------------------------------------
+assign panel_border =
+    top_left_border ||
+    top_right_border ||
+    bottom_left_border ||
+    bottom_right_border;
+
+// ============================================================
+// DEGREE SYMBOLS
+// ============================================================
+
+// ------------------------------------------------------------
+// 5x5 degree symbol
+// ------------------------------------------------------------
+function automatic logic degree_symbol
+(
+    input logic [10:0] px,
+    input logic [10:0] py,
+    input logic [10:0] cx,
+    input logic [10:0] cy
+);
+begin
+    degree_symbol =
+        (
+            ((px == cx + 1) ||
+             (px == cx + 2) ||
+             (px == cx + 3)) &&
+            ((py == cy) ||
+             (py == cy + 4))
+        ) ||
+        (
+            ((px == cx) ||
+             (px == cx + 4)) &&
+            (py >= cy + 1) &&
+            (py <= cy + 3)
+        );
+end
+endfunction
+
+// ------------------------------------------------------------
+// Degree symbol positions
+//
+// PITCH: moved up 2 pixels, Y 8 -> 6
+// ROLL:  moved up 2 pixels, Y 8 -> 6
+// HDG:   unchanged
+// ------------------------------------------------------------
+assign degree_pixel =
+    degree_symbol(
+        panel_x, panel_y,
+        11'd100, 11'd6
+    ) ||
+    degree_symbol(
+        panel_x, panel_y,
+        11'd628, 11'd6
+    ) ||
+    degree_symbol(
+        panel_x, panel_y,
+        11'd68, 11'd451
+    );
+
+// ------------------------------------------------------------
+// Final RGB priority
+//
+// 1. Cyan panel borders
+// 2. White degree symbols
+// 3. Black clipping for top text
+// 4. OSD / black panels / scenery
+// ------------------------------------------------------------
+assign panel_rgb =
+    panel_border ? BORDER_COLOR :
+    degree_pixel ? WHITE :
+    top_text_clip ? BLACK :
+    osd_rgb2;
 
 // ------------------------------------------------------------
 // VGA synchronization - V0_SYNC
 // ------------------------------------------------------------
 assign line_data_in =
-    {osd_rgb2, frame_start_d_reg[13]};
+    {panel_rgb, frame_start_d_reg[13]};
 
 chu_vga_sync_core
 #(
