@@ -173,6 +173,86 @@ const MountainDefinition MOUNTAINS[MOUNTAIN_COUNT] =
     {M3_X, M3_Z, M3_HEIGHT, M3_RADIUS}
 };
 
+// ------------------------------------------------------------
+// Milestone 11B: Collision detection with square pyramids
+// The aircraft is treated as a point with 5 meters clearance.
+// Mountain heights and aircraft X/Z are in meters.
+// ------------------------------------------------------------
+float get_mountain_height(const MountainDefinition &mountain,
+                          float world_x, float world_z)
+{
+    const float dx = fabs(world_x - mountain.x);
+    const float dz = fabs(world_z - mountain.z);
+
+    // Outside the square footprint of the mountain
+    if (dx > mountain.radius || dz > mountain.radius)
+        return 0.0f;
+
+    // Surface of a four-sided pyramid with square base
+    const float distance = (dx > dz) ? dx : dz;
+    return mountain.height * (1.0f - distance / mountain.radius);
+}
+
+bool check_mountain_collision(const AircraftState *aircraft)
+{
+    // Keep the tuned collision parameters from the working baseline.
+    const float LOOKAHEAD_M = 200.0f;
+    const float LATERAL_MARGIN_M = 50.0f;
+    const float VERTICAL_MARGIN_M = 80.0f;
+    const int LOOKAHEAD_STEPS = 10;
+
+    const float altitude_m = aircraft->altitude / METER_TO_FEET;
+    const float heading_rad = aircraft->heading * DEG_TO_RAD;
+    const float forward_x = sin(heading_rad);
+    const float forward_z = cos(heading_rad);
+
+    // The vertical margin expands the mountain upward, so its
+    // cross-section is evaluated slightly below aircraft altitude.
+    const float effective_altitude_m = altitude_m - VERTICAL_MARGIN_M;
+
+    for (int i = 0; i < MOUNTAIN_COUNT; i++)
+    {
+        const MountainDefinition &m = MOUNTAINS[i];
+
+        // Above the summit (including clearance): no collision.
+        if (effective_altitude_m > m.height)
+            continue;
+
+        // A square pyramid gets wider as altitude decreases.
+        // At the summit its half-width is 0; at the base it is m.radius.
+        float height_fraction = 1.0f - effective_altitude_m / m.height;
+        if (height_fraction < 0.0f) height_fraction = 0.0f;
+        if (height_fraction > 1.0f) height_fraction = 1.0f;
+
+        // Mountain 3 gets a smaller margin to allow closer flybys.
+        // Mountains 1 and 2 retain the original 50 m margin.
+        const float lateral_margin =
+            (i == 2) ? 15.0f : LATERAL_MARGIN_M;
+
+        const float collision_half_width =
+            m.radius * height_fraction + lateral_margin;
+
+        // Check the aircraft's projected path against the square
+        // cross-section. No new geometry rendering or extra VGA writes.
+        for (int step = 0; step <= LOOKAHEAD_STEPS; step++)
+        {
+            const float distance =
+                LOOKAHEAD_M * step / LOOKAHEAD_STEPS;
+            const float future_x = aircraft->x + forward_x * distance;
+            const float future_z = aircraft->z + forward_z * distance;
+
+            if (fabs(future_x - m.x) <= collision_half_width &&
+                fabs(future_z - m.z) <= collision_half_width)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+
 // World vertices
 Vertex3D mountain_vertices[TOTAL_VERTICES];
 
@@ -189,8 +269,9 @@ const Vertex3D CLOUD_POSITIONS[CLOUD_COUNT] =
 // ------------------------------------------------------------
 // Mountain face indices
 //
-// Faces 0-11  = snowcaps
-// Faces 12-23 = mountain bodies
+// Source faces 0-11  = snowcaps
+// Source faces 12-23 = mountain bodies
+// Hardware slots are assigned dynamically in update_mountain().
 // ------------------------------------------------------------
 const int FACE_INDICES[TOTAL_FACES][3] =
 {
@@ -732,66 +813,209 @@ void disable_mountain_face(int face)
 // ------------------------------------------------------------
 // Update all three mountains and snowcaps
 // ------------------------------------------------------------
+// Convert a world vertex to camera space (before perspective division).
+Vertex3D mountain_camera_vertex(const Vertex3D &v,
+                                const AircraftState *aircraft,
+                                const CameraTransform *camera)
+{
+    const float dx = v.x - aircraft->x;
+    const float dz = v.z - aircraft->z;
+    Vertex3D result = {
+        camera->cos_heading * dx - camera->sin_heading * dz,
+        v.y - camera->altitude_m,
+        camera->sin_heading * dx + camera->cos_heading * dz
+    };
+    return result;
+}
+
+// Project a camera-space vertex already on or in front of the near plane.
+Vertex2D project_mountain_camera_vertex(const Vertex3D &v,
+                                       const CameraTransform *camera)
+{
+    const float px = FOCAL_LENGTH * v.x / v.z;
+    const float py = -FOCAL_LENGTH * v.y / v.z;
+    const float x = 320.0f + camera->cos_roll * px + camera->sin_roll * py;
+    const float y = 240.0f + camera->pitch_offset -
+                    camera->sin_roll * px + camera->cos_roll * py;
+    Vertex2D result = {
+        (int32_t)clamp_value(x, -2048.0f, 2048.0f),
+        (int32_t)clamp_value(y, -2048.0f, 2048.0f)
+    };
+    return result;
+}
+
+// Clip an edge to camera_z = MIN_DEPTH.
+Vertex3D mountain_near_intersection(const Vertex3D &a,
+                                    const Vertex3D &b)
+{
+    const float t = (MIN_DEPTH - a.z) / (b.z - a.z);
+    Vertex3D result = {
+        a.x + t * (b.x - a.x),
+        a.y + t * (b.y - a.y),
+        MIN_DEPTH
+    };
+    return result;
+}
+
+// A clipped triangle has zero, three, or four vertices (apart from
+// degenerate boundary cases). Keep the original winding order.
+int clip_mountain_triangle(const Vertex3D in[3], Vertex3D out[4])
+{
+    int count = 0;
+    for (int i = 0; i < 3; i++)
+    {
+        const Vertex3D &a = in[i];
+        const Vertex3D &b = in[(i + 1) % 3];
+        const bool a_inside = a.z >= MIN_DEPTH;
+        const bool b_inside = b.z >= MIN_DEPTH;
+
+        if (a_inside && b_inside)
+            out[count++] = b;
+        else if (a_inside && !b_inside)
+            out[count++] = mountain_near_intersection(a, b);
+        else if (!a_inside && b_inside)
+        {
+            out[count++] = mountain_near_intersection(a, b);
+            out[count++] = b;
+        }
+    }
+    return count;
+}
+
+bool mountain_front_facing(const Vertex2D v[3])
+{
+    const int64_t area =
+        (int64_t)(v[1].x - v[0].x) * (v[2].y - v[0].y) -
+        (int64_t)(v[1].y - v[0].y) * (v[2].x - v[0].x);
+    return area < 0;
+}
+
+struct ExtraMountainTriangle
+{
+    Vertex2D v[3];
+    uint16_t color;
+};
+
 void update_mountain(
     AircraftState *aircraft,
     CameraTransform *camera)
 {
     Vertex2D projected[TOTAL_VERTICES];
     bool visible[TOTAL_VERTICES];
+    Vertex3D camera_vertices[TOTAL_VERTICES];
 
-    // Project 27 world vertices
+    // Cache camera-space coordinates for all three mountains.
     for (int i = 0; i < TOTAL_VERTICES; i++)
     {
-        visible[i] = project_vertex(
-            mountain_vertices[i],
-            aircraft,
-            camera,
-            &projected[i]);
+        camera_vertices[i] = mountain_camera_vertex(
+            mountain_vertices[i], aircraft, camera);
+        visible[i] = camera_vertices[i].z >= MIN_DEPTH;
+        if (visible[i])
+            projected[i] = project_mountain_camera_vertex(
+                camera_vertices[i], camera);
     }
 
-    // Update all 24 triangle faces
-    for (int f = 0; f < TOTAL_FACES; f++)
+    // Sort mountains by their center depth in camera space.
+    // Assumes the FPGA gives lower-numbered face slots priority.
+    // Each mountain gets eight consecutive slots: snowcap, then body.
+    int order[MOUNTAIN_COUNT] = {0, 1, 2};
+    for (int i = 0; i < MOUNTAIN_COUNT - 1; i++)
     {
-        int i0 = FACE_INDICES[f][0];
-        int i1 = FACE_INDICES[f][1];
-        int i2 = FACE_INDICES[f][2];
-
-        if (!visible[i0] ||
-            !visible[i1] ||
-            !visible[i2])
+        for (int j = i + 1; j < MOUNTAIN_COUNT; j++)
         {
-            disable_mountain_face(f);
-            continue;
+            const float depth_i =
+                camera_vertices[order[i] * VERTICES_PER_MOUNTAIN + 4].z;
+            const float depth_j =
+                camera_vertices[order[j] * VERTICES_PER_MOUNTAIN + 4].z;
+            if (depth_j < depth_i)
+            {
+                const int temp = order[i];
+                order[i] = order[j];
+                order[j] = temp;
+            }
         }
-
-        Vertex2D v[3] =
-        {
-            projected[i0],
-            projected[i1],
-            projected[i2]
-        };
-
-        // Signed projected triangle area
-        int64_t area =
-            (int64_t)(v[1].x - v[0].x) *
-                      (v[2].y - v[0].y) -
-            (int64_t)(v[1].y - v[0].y) *
-                      (v[2].x - v[0].x);
-
-        // Back-face culling
-        if (area >= 0)
-        {
-            disable_mountain_face(f);
-            continue;
-        }
-
-        write_mountain_face(f, v, FACE_COLORS[f]);
     }
 
-    // Commit all 24 faces
-    mountain.wr_mem(MOUNTAIN_COMMIT_REG, 1);
+    int rank[MOUNTAIN_COUNT];
+    for (int i = 0; i < MOUNTAIN_COUNT; i++)
+        rank[order[i]] = i;
 
-    // Enable renderer
+    // Keep clipping and free-slot reuse within each four-face group.
+    for (int group = 0; group < TOTAL_FACES; group += 4)
+    {
+        const int mountain_index = (group / 4) % MOUNTAIN_COUNT;
+        const bool is_body = group >= TOTAL_FACES / 2;
+        const int slot_base = rank[mountain_index] * 8 + (is_body ? 4 : 0);
+        int free_slots[4];
+        int free_count = 0;
+        ExtraMountainTriangle extra[4];
+        int extra_count = 0;
+
+        for (int f = group; f < group + 4; f++)
+        {
+            const int slot = slot_base + (f - group);
+            const int i0 = FACE_INDICES[f][0];
+            const int i1 = FACE_INDICES[f][1];
+            const int i2 = FACE_INDICES[f][2];
+            bool written = false;
+
+            if (visible[i0] && visible[i1] && visible[i2])
+            {
+                Vertex2D v[3] = {projected[i0], projected[i1], projected[i2]};
+                if (mountain_front_facing(v))
+                {
+                    write_mountain_face(slot, v, FACE_COLORS[f]);
+                    written = true;
+                }
+            }
+            else if (visible[i0] || visible[i1] || visible[i2])
+            {
+                const Vertex3D in[3] = {
+                    camera_vertices[i0], camera_vertices[i1], camera_vertices[i2]
+                };
+                Vertex3D clipped[4];
+                const int count = clip_mountain_triangle(in, clipped);
+                Vertex2D screen[4];
+                for (int i = 0; i < count; i++)
+                    screen[i] = project_mountain_camera_vertex(clipped[i], camera);
+
+                // Triangulate the clipped polygon, keeping its winding.
+                for (int i = 1; i + 1 < count; i++)
+                {
+                    Vertex2D v[3] = {screen[0], screen[i], screen[i + 1]};
+                    if (!mountain_front_facing(v))
+                        continue;
+
+                    if (!written)
+                    {
+                        write_mountain_face(slot, v, FACE_COLORS[f]);
+                        written = true;
+                    }
+                    else
+                    {
+                        for (int j = 0; j < 3; j++)
+                            extra[extra_count].v[j] = v[j];
+                        extra[extra_count].color = FACE_COLORS[f];
+                        extra_count++;
+                    }
+                }
+            }
+
+            if (!written)
+                free_slots[free_count++] = slot;
+        }
+
+        // No extra FPGA registers or triangle slots are required.
+        for (int i = 0; i < free_count; i++)
+        {
+            if (i < extra_count)
+                write_mountain_face(free_slots[i], extra[i].v, extra[i].color);
+            else
+                disable_mountain_face(free_slots[i]);
+        }
+    }
+
+    mountain.wr_mem(MOUNTAIN_COMMIT_REG, 1);
     mountain.bypass(0);
 }
 
@@ -891,7 +1115,7 @@ void osd_print(int x, int y, const char *text)
 }
 
 // ------------------------------------------------------------
-// Initialize transparent OSD telemetry
+// Initialize VGA telemetry
 // 80 columns x 30 rows, 8x16 pixels per character
 // ------------------------------------------------------------
 void initialize_osd()
@@ -959,6 +1183,44 @@ void update_osd(const AircraftState *aircraft)
     if (value > 9999) value = 9999;
     snprintf(line, sizeof(line), "VS %c%04d FPM", sign, value);
     osd_print(67, 29, line);
+}
+
+// ------------------------------------------------------------
+// Milestone 11C: Crash screen and automatic restart
+// Reuses the existing character OSD: no new FPGA core needed.
+// ------------------------------------------------------------
+void show_crash_screen()
+{
+    osd.bypass(1);
+    osd.clr_screen();
+
+    // Red text, black background. Spaces produce opaque black
+    // character cells with the current magenta chroma-key setup.
+    osd.set_color(0xF00, 0x000);
+
+    for (int row = 0; row < 30; row++)
+    {
+        for (int col = 0; col < 80; col++)
+            osd.wr_char(col, row, ' ');
+    }
+
+    osd_print(36, 12, "CRASHED");
+    osd_print(31, 15, "TERRAIN COLLISION");
+    osd_print(32, 18, "RESETTING IN 2");
+    osd.bypass(0);
+
+    uart.disp("\n\r*** MOUNTAIN COLLISION - CRASHED ***\n\r");
+
+    // Simple two-step countdown while the aircraft is frozen.
+    sleep_ms(1000);
+    osd_print(32, 18, "RESETTING IN 1");
+    sleep_ms(1000);
+
+    // Clear the crash screen and restore live telemetry settings.
+    osd.bypass(1);
+    osd.clr_screen();
+    osd.set_color(0xFFF, 0x000);
+    osd.bypass(0);
 }
 
 // ------------------------------------------------------------
@@ -1041,7 +1303,8 @@ void flight_simulator(
     uart.disp("Three snowcapped mountains enabled!\n\r");
     uart.disp("Moving clouds enabled!\n\r");
     uart.disp("Attitude HUD enabled!\n\r");
-    uart.disp("Transparent OSD enabled!\n\r");
+    uart.disp("Live OSD enabled!\n\r");
+    uart.disp("Mountain collision and crash reset enabled!\n\r");
 
     uart.disp("SW0-SW3 = Airspeed (60-180 knots)\n\r");
     uart.disp("SW15 ON = Reset and Hold\n\r");
@@ -1120,6 +1383,16 @@ void flight_simulator(
 
         // Update flight dynamics
         update_flight_dynamics(&aircraft);
+
+        // Mountain collision: freeze, show the crash screen,
+        // and restore the original flight state after countdown.
+        if (check_mountain_collision(&aircraft))
+        {
+            show_crash_screen();
+            reset_flight(&aircraft);
+            print_counter = 0;
+            continue;
+        }
 
         // Update artificial horizon and HUD
         update_horizon(
